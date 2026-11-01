@@ -1,17 +1,33 @@
-"""Terminal de paiement simule (M1) : envoie une demande d'autorisation ISO 8583 0100."""
+"""Terminal de paiement simule (M1) : demande d'autorisation ISO 8583 signee (MAC DE64)."""
 import argparse
 import asyncio
 import ssl
 import struct
+from pathlib import Path
 
 import iso8583
+from cryptography import x509
+from cryptography.x509.oid import NameOID
 
+from secumon.common.config import load_dotenv
 from secumon.gateway.tls import build_client_context
+from secumon.hsm.keys import load_master_key, terminal_mac_key
+from secumon.iso8583.mac import MacError, sign_message, verify_and_decode
 from secumon.iso8583.messages import SPEC, build_auth_request, decode_message, encode_message
 
 
+def certificate_cn(cert_path: str) -> str:
+    """Identite reelle du terminal = CN de son certificat."""
+    cert = x509.load_pem_x509_certificate(Path(cert_path).read_bytes())
+    return cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+
+
 async def run(args) -> None:
+    load_dotenv()
     ctx = build_client_context(args.ca, args.cert, args.key)
+    # Cle MAC du terminal (simulation de l'injection de cle)
+    mac_key = terminal_mac_key(load_master_key(), certificate_cn(args.cert))
+
     request = build_auth_request(
         pan=args.pan,
         amount_cents=round(args.amount * 100),
@@ -19,10 +35,16 @@ async def run(args) -> None:
         merchant_id=args.merchant,
         mcc=args.mcc,
     )
-    raw = encode_message(request)
+    raw = encode_message(request) if args.no_mac else sign_message(request, mac_key)
+
+    if args.tamper:
+        # ATTAQUE : un intermediaire modifie le montant APRES le calcul du MAC
+        forged = b"000099999900"  # 999 999,00
+        raw = raw.replace(request["4"].encode(), forged, 1)
+        print(f"!!! ATTAQUE : montant modifie en transit {request['4']} -> {forged.decode()}")
 
     print("=== Demande envoyee ===")
-    iso8583.pp(request, SPEC)
+    iso8583.pp(decode_message(raw), SPEC)
 
     try:
         reader, writer = await asyncio.open_connection(
@@ -31,16 +53,24 @@ async def run(args) -> None:
         writer.write(struct.pack(">H", len(raw)) + raw)
         await writer.drain()
         (n,) = struct.unpack(">H", await reader.readexactly(2))
-        response = decode_message(await reader.readexactly(n))
+        response_raw = await reader.readexactly(n)
         writer.close()
         await writer.wait_closed()
     except (ssl.SSLError, ConnectionError, asyncio.IncompleteReadError) as exc:
         print(f"\nREFUSE - {type(exc).__name__} : {exc}")
         return
 
+    try:
+        response = verify_and_decode(response_raw, mac_key)
+        mac_status = "VALIDE"
+    except MacError as exc:
+        response = decode_message(response_raw)
+        mac_status = f"INVALIDE ({exc})"
+
     print("\n=== Reponse recue ===")
     iso8583.pp(response, SPEC)
-    print(f"\nResultat : DE39 = {response.get('39')}")
+    print(f"\nMAC de la reponse : {mac_status}")
+    print(f"Resultat : DE39 = {response.get('39')}")
 
 
 if __name__ == "__main__":
@@ -55,4 +85,6 @@ if __name__ == "__main__":
     p.add_argument("--amount", type=float, default=150.00)
     p.add_argument("--merchant", default="MERCHANT0000001")
     p.add_argument("--mcc", default="5411")
+    p.add_argument("--tamper", action="store_true", help="attaque : modifie le montant apres le MAC")
+    p.add_argument("--no-mac", action="store_true", help="attaque : envoie le message sans MAC")
     asyncio.run(run(p.parse_args()))
