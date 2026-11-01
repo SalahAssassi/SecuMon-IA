@@ -1,13 +1,16 @@
-"""Passerelle acquereur SecuMon-IA (M2) - mTLS + ISO 8583 + MAC DE64."""
+"""Passerelle acquereur SecuMon-IA (M2) - mTLS + ISO 8583 + MAC DE64 + anti-rejeu."""
 import asyncio
 import contextlib
 import logging
+import os
 import ssl
 import struct
 
 import iso8583
+import redis
 
 from secumon.common.config import load_dotenv
+from secumon.gateway.replay import ReplayError, ReplayGuard
 from secumon.gateway.tls import build_server_context, peer_common_name
 from secumon.hsm.keys import load_master_key, terminal_mac_key
 from secumon.iso8583.mac import MacError, sign_message, verify_and_decode
@@ -34,8 +37,8 @@ def write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:
     writer.write(struct.pack(">H", len(payload)) + payload)
 
 
-def process_message(raw: bytes, terminal_id: str, mac_key: bytes) -> bytes:
-    """Verifie (syntaxe, MAC, identite) et repond. Reponse toujours signee (MAC)."""
+def process_message(raw: bytes, terminal_id: str, mac_key: bytes, guard: ReplayGuard) -> bytes:
+    """Chaine de controles : syntaxe -> MAC -> MTI -> identite -> anti-rejeu -> decision."""
     # 1. Syntaxe + integrite (MAC)
     try:
         request = verify_and_decode(raw, mac_key)
@@ -58,7 +61,14 @@ def process_message(raw: bytes, terminal_id: str, mac_key: bytes) -> bytes:
                     terminal_id, terminal_id, declared_terminal)
         return sign_message(build_auth_response(request, RC_SECURITY_VIOLATION), mac_key)
 
-    # 4. Transaction acceptee (le scoring de fraude M5 viendra ici)
+    # 4. Anti-rejeu (uniquement sur des messages authentifies)
+    try:
+        guard.check(terminal_id, request.get("11"), request.get("7"))
+    except ReplayError as exc:
+        log.warning("[%s] ANTI-REJEU : %s", terminal_id, exc)
+        return sign_message(build_auth_response(request, exc.response_code), mac_key)
+
+    # 5. Transaction acceptee (le scoring de fraude M5 viendra ici)
     amount = int(request.get("4", "0")) / 100
     log.info("[%s] %s STAN=%s PAN=%s montant=%.2f devise=%s MCC=%s MAC=OK -> DE39=%s",
              terminal_id, request["t"], request.get("11"), mask_pan(request.get("2", "")),
@@ -66,7 +76,8 @@ def process_message(raw: bytes, terminal_id: str, mac_key: bytes) -> bytes:
     return sign_message(build_auth_response(request, RC_APPROVED), mac_key)
 
 
-async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext, master_key: bytes) -> None:
+async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext,
+                            master_key: bytes, guard: ReplayGuard) -> None:
     peer = writer.get_extra_info("peername")
     try:
         await writer.start_tls(tls_ctx)
@@ -79,15 +90,14 @@ async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext, master_key:
 
     ssl_obj = writer.get_extra_info("ssl_object")
     terminal_id = peer_common_name(ssl_obj)
-    # Cle MAC choisie d'apres le CERTIFICAT (identite authentifiee), jamais d'apres DE41
-    mac_key = terminal_mac_key(master_key, terminal_id)
+    mac_key = terminal_mac_key(master_key, terminal_id)  # d'apres le CERTIFICAT, jamais DE41
     log.info("Connexion ACCEPTEE : terminal=%s ip=%s %s %s",
              terminal_id, peer, ssl_obj.version(), ssl_obj.cipher()[0])
 
     try:
         while True:
             raw = await read_frame(reader)
-            write_frame(writer, process_message(raw, terminal_id, mac_key))
+            write_frame(writer, process_message(raw, terminal_id, mac_key, guard))
             await writer.drain()
     except asyncio.IncompleteReadError:
         log.info("[%s] deconnexion", terminal_id)
@@ -102,12 +112,22 @@ async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext, master_key:
 async def main() -> None:
     load_dotenv()
     master_key = load_master_key()
+
+    store = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0"),
+                                 decode_responses=True)
+    try:
+        store.ping()
+    except redis.ConnectionError:
+        log.error("Redis injoignable : lancez 'sudo service redis-server start'")
+        return
+    guard = ReplayGuard(store)
+
     tls_ctx = build_server_context(CERT, KEY, CA)
     server = await asyncio.start_server(
-        lambda r, w: handle_connection(r, w, tls_ctx, master_key), HOST, PORT
+        lambda r, w: handle_connection(r, w, tls_ctx, master_key, guard), HOST, PORT
     )
-    log.info("Passerelle SecuMon-IA en ecoute sur %s:%d (TLS 1.3 + mTLS + ISO 8583 + MAC)",
-             HOST, PORT)
+    log.info("Passerelle SecuMon-IA en ecoute sur %s:%d "
+             "(TLS 1.3 + mTLS + ISO 8583 + MAC + anti-rejeu)", HOST, PORT)
     async with server:
         await server.serve_forever()
 
