@@ -1,0 +1,31 @@
+# --- Secrets et cryptographie (JAMAIS dans Git) ---
+pki/**/*.key
+pki/**/*.pem
+pki/**/*.crt
+pki/**/*.csr
+pki/**/*.srl
+*.p12
+.env
+secrets/
+
+# --- Données ---
+data/raw/*
+data/processed/*
+!data/**/.gitkeep
+*.pcap
+*.pcapng
+
+# --- Python ---
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# --- Éditeurs / OS ---
+.vscode/
+Thumbs.db
+desktop.ini
+
+# --- Frontend ---
+frontend/node_modules/
+frontend/dist/
