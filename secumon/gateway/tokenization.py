@@ -4,7 +4,8 @@ import os
 
 from ff3 import FF3Cipher
 
-TOKEN_KEY_ENV = "SECUMON_TOKEN_KEY"  # nosec B105 - nom de variable, pas un secret
+# Nom de variable, pas un secret : faux positif Bandit B105
+TOKEN_KEY_ENV = "SECUMON_TOKEN_KEY"  # nosec B105
 KEEP_FIRST, KEEP_LAST = 6, 4   # BIN + 4 derniers chiffres restent visibles
 MIN_MIDDLE = 6                 # NIST : domaine >= 10^6 pour la base 10
 

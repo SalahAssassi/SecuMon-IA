@@ -12,7 +12,8 @@ def _path(terminal_id: str) -> Path:
 
 def save_terminal_key(terminal_id: str, value: bytes) -> None:
     KEYSTORE_DIR.mkdir(parents=True, exist_ok=True)
-    os.chmod(KEYSTORE_DIR, 0o700)
+    # 0o700 = proprietaire seul : le plus restrictif possible pour un dossier (faux positif Semgrep)
+    os.chmod(KEYSTORE_DIR, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
     # Fichier cree directement avec les droits 600 : jamais lisible par un autre utilisateur
     fd = os.open(_path(terminal_id), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
