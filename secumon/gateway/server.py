@@ -1,4 +1,4 @@
-"""Passerelle acquereur SecuMon-IA (M2) - mTLS + ISO 8583 + MAC DE64 + anti-rejeu."""
+"""Passerelle acquereur SecuMon-IA (M2) - mTLS + ISO 8583 + MAC + anti-rejeu + rate limiting."""
 import asyncio
 import contextlib
 import logging
@@ -10,6 +10,7 @@ import iso8583
 import redis
 
 from secumon.common.config import load_dotenv
+from secumon.gateway.ratelimit import RateLimiter
 from secumon.gateway.replay import ReplayError, ReplayGuard
 from secumon.gateway.tls import build_server_context, peer_common_name
 from secumon.hsm.keys import load_master_key, terminal_mac_key
@@ -76,8 +77,8 @@ def process_message(raw: bytes, terminal_id: str, mac_key: bytes, guard: ReplayG
     return sign_message(build_auth_response(request, RC_APPROVED), mac_key)
 
 
-async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext,
-                            master_key: bytes, guard: ReplayGuard) -> None:
+async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext, master_key: bytes,
+                            guard: ReplayGuard, limiter: RateLimiter) -> None:
     peer = writer.get_extra_info("peername")
     try:
         await writer.start_tls(tls_ctx)
@@ -97,6 +98,11 @@ async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext,
     try:
         while True:
             raw = await read_frame(reader)
+            # Rate limiting AVANT tout traitement couteux (MAC, Redis anti-rejeu...)
+            if not limiter.allow(terminal_id):
+                log.warning("[%s] RATE LIMIT : plus de %d messages/s -> connexion coupee "
+                            "(flood suspect)", terminal_id, limiter.max_per_second)
+                break
             write_frame(writer, process_message(raw, terminal_id, mac_key, guard))
             await writer.drain()
     except asyncio.IncompleteReadError:
@@ -121,13 +127,15 @@ async def main() -> None:
         log.error("Redis injoignable : lancez 'sudo service redis-server start'")
         return
     guard = ReplayGuard(store)
+    limiter = RateLimiter(store, int(os.environ.get("RATE_LIMIT_PER_SECOND", "10")))
 
     tls_ctx = build_server_context(CERT, KEY, CA)
     server = await asyncio.start_server(
-        lambda r, w: handle_connection(r, w, tls_ctx, master_key, guard), HOST, PORT
+        lambda r, w: handle_connection(r, w, tls_ctx, master_key, guard, limiter), HOST, PORT
     )
     log.info("Passerelle SecuMon-IA en ecoute sur %s:%d "
-             "(TLS 1.3 + mTLS + ISO 8583 + MAC + anti-rejeu)", HOST, PORT)
+             "(TLS 1.3 + mTLS + ISO 8583 + MAC + anti-rejeu + rate limiting %d/s)",
+             HOST, PORT, limiter.max_per_second)
     async with server:
         await server.serve_forever()
 
