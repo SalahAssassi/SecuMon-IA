@@ -75,3 +75,34 @@ def test_cle_mac_usage_limite_au_mac(hsm):
 def test_terminal_inconnu_refuse(hsm):
     with pytest.raises(HsmKeyNotFound):
         hsm.terminal_key("INCONNU1")
+
+
+# --- PIN block dans le HSM --------------------------------------------------
+from secumon.hsm.pinblock import SoftwareAes, decode, encode, translate  # noqa: E402
+
+PIN_TEST_LABELS = ("TPK-PYTEST01", "TPK-PYTEST02")
+
+
+@pytest.fixture
+def pin_hsm():
+    with Hsm.from_env(rw=True) as h:
+        for label in PIN_TEST_LABELS:
+            h.delete_key(label)
+        yield h
+        for label in PIN_TEST_LABELS:
+            h.delete_key(label)
+
+
+def test_traduction_pin_dans_le_hsm(pin_hsm):
+    src, dst = secrets.token_bytes(16), secrets.token_bytes(16)
+    hsm_src = pin_hsm.import_terminal_pin_key("PYTEST01", src)
+    hsm_dst = pin_hsm.import_terminal_pin_key("PYTEST02", dst)
+    block = encode("1234", "4111111111111111", SoftwareAes(src))      # terminal (logiciel)
+    translated = translate(block, "4111111111111111", hsm_src, hsm_dst)  # passerelle (HSM)
+    assert decode(translated, "4111111111111111", SoftwareAes(dst)) == "1234"
+
+
+def test_cle_pin_ne_peut_pas_signer(pin_hsm):
+    key = pin_hsm.import_terminal_pin_key("PYTEST01", secrets.token_bytes(16))._key
+    assert key[Attribute.ENCRYPT] is True and key[Attribute.DECRYPT] is True
+    assert key[Attribute.SIGN] is False and key[Attribute.VERIFY] is False

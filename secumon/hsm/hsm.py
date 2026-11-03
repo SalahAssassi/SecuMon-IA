@@ -77,3 +77,67 @@ class Hsm:
         for obj in self.session.get_objects({Attribute.CLASS: ObjectClass.SECRET_KEY,
                                              Attribute.LABEL: key_label(terminal_id)}):
             obj.destroy()
+
+    # --- Cles PIN (ISO 9564) : chiffrement uniquement --------------------------
+    @staticmethod
+    def _pin_key_template(label: str) -> dict:
+        return {
+            Attribute.LABEL: label,
+            Attribute.TOKEN: True,
+            Attribute.PRIVATE: True,
+            Attribute.ENCRYPT: True,        # une cle PIN = chiffrement uniquement
+            Attribute.DECRYPT: True,
+            Attribute.SIGN: False,
+            Attribute.VERIFY: False,
+            Attribute.WRAP: False,
+            Attribute.UNWRAP: False,
+            Attribute.DERIVE: False,
+            Attribute.SENSITIVE: True,
+            Attribute.EXTRACTABLE: False,
+        }
+
+    def _get_aes(self, label: str):
+        try:
+            return self.session.get_key(object_class=ObjectClass.SECRET_KEY,
+                                        key_type=KeyType.AES, label=label)
+        except NoSuchKey:
+            raise HsmKeyNotFound(label) from None
+
+    def delete_key(self, label: str) -> None:
+        for obj in self.session.get_objects({Attribute.CLASS: ObjectClass.SECRET_KEY,
+                                             Attribute.LABEL: label}):
+            obj.destroy()
+
+    def import_terminal_pin_key(self, terminal_id: str, value: bytes) -> "HsmAes":
+        template = self._pin_key_template(f"TPK-{terminal_id}")
+        template.update({Attribute.CLASS: ObjectClass.SECRET_KEY,
+                         Attribute.KEY_TYPE: KeyType.AES, Attribute.VALUE: value})
+        return HsmAes(self.session.create_object(template))
+
+    def terminal_pin_key(self, terminal_id: str) -> "HsmAes":
+        return HsmAes(self._get_aes(f"TPK-{terminal_id}"))
+
+    def generate_zone_pin_key(self) -> "HsmAes":
+        """ZPK generee DANS le HSM : sa valeur n'a jamais existe en dehors."""
+        key = self.session.generate_key(KeyType.AES, 128, label=ZPK_LABEL, store=True,
+                                        template=self._pin_key_template(ZPK_LABEL))
+        return HsmAes(key)
+
+    def zone_pin_key(self) -> "HsmAes":
+        return HsmAes(self._get_aes(ZPK_LABEL))
+
+
+ZPK_LABEL = "ZPK-SECUMON"
+
+
+class HsmAes:
+    """Moteur AES du HSM pour le PIN block : chaque bloc est chiffre DANS le HSM."""
+
+    def __init__(self, key):
+        self._key = key
+
+    def encrypt_block(self, data: bytes) -> bytes:
+        return self._key.encrypt(data, mechanism=Mechanism.AES_ECB)
+
+    def decrypt_block(self, data: bytes) -> bytes:
+        return self._key.decrypt(data, mechanism=Mechanism.AES_ECB)

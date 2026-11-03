@@ -69,3 +69,8 @@ class SoftwareAes:
     def decrypt_block(self, data: bytes) -> bytes:
         dec = self._cipher.decryptor()
         return dec.update(data) + dec.finalize()
+
+
+def pin_key_kcv(cipher) -> str:
+    """KCV classique d'une cle de chiffrement : 3 premiers octets de AES(cle, bloc de zeros)."""
+    return cipher.encrypt_block(bytes(BLOCK))[:3].hex().upper()
