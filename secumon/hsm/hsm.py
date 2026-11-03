@@ -63,6 +63,11 @@ class Hsm:
             Attribute.PRIVATE: True,        # accessible uniquement apres login
             Attribute.SIGN: True,
             Attribute.VERIFY: True,
+            Attribute.ENCRYPT: False,       # une cle = un usage : MAC uniquement
+            Attribute.DECRYPT: False,
+            Attribute.WRAP: False,
+            Attribute.UNWRAP: False,
+            Attribute.DERIVE: False,
             Attribute.SENSITIVE: True,      # jamais lisible en clair
             Attribute.EXTRACTABLE: False,   # jamais exportable
         })
