@@ -7,6 +7,9 @@ import iso8583
 from iso8583.specs import default_ascii
 
 SPEC = copy.deepcopy(default_ascii)
+# DE52 : PIN block AES (ISO 9564-1 format 4) = 16 octets, transmis en 32 caracteres hex.
+# Adaptation du champ 64 bits historique (ISO 8583:1987) a un bloc AES de 128 bits.
+SPEC["52"] = {**SPEC["64"], "max_len": 32, "desc": "PIN Data (ISO 9564-1 format 4)"}
 
 MTI_AUTH_REQUEST = "0100"
 MTI_AUTH_RESPONSE = "0110"

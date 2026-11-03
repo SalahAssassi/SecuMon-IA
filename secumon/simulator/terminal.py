@@ -1,5 +1,6 @@
 """Terminal de paiement simule (M1) : demande d'autorisation ISO 8583 signee (MAC DE64)."""
 import argparse
+import secrets
 import asyncio
 import ssl
 import struct
@@ -12,6 +13,8 @@ from cryptography.x509.oid import NameOID
 from secumon.common.config import load_dotenv
 from secumon.gateway.tls import build_client_context
 from secumon.simulator.keystore import load_terminal_key
+from secumon.hsm.pinblock import SoftwareAes
+from secumon.hsm.pinblock import encode as encode_pin_block
 from secumon.iso8583.mac import MacError, sign_message, verify_and_decode
 from secumon.iso8583.messages import SPEC, build_auth_request, decode_message, encode_message
 
@@ -47,6 +50,13 @@ async def run(args) -> None:
         merchant_id=args.merchant,
         mcc=args.mcc,
     )
+    if args.pin:
+        # Le PIN est chiffre DANS le terminal avec sa TPK : il ne circule jamais en clair
+        tpk = (secrets.token_bytes(16) if args.forge_pin
+               else load_terminal_key(certificate_cn(args.cert), "tpk"))
+        request["52"] = encode_pin_block(args.pin, args.pan, SoftwareAes(tpk)).hex().upper()
+        if args.forge_pin:
+            print("!!! ATTAQUE : PIN block chiffre avec une cle inconnue de la banque")
     raw = encode_message(request) if args.no_mac else sign_message(request, mac_key)
 
     if args.tamper:
@@ -90,4 +100,6 @@ if __name__ == "__main__":
     p.add_argument("--tamper", action="store_true", help="attaque : modifie le montant apres le MAC")
     p.add_argument("--no-mac", action="store_true", help="attaque : envoie le message sans MAC")
     p.add_argument("--replay", action="store_true", help="attaque : renvoie deux fois le meme message")
+    p.add_argument("--pin", help="PIN de TEST : ajoute un PIN block ISO 9564 format 4 dans DE52")
+    p.add_argument("--forge-pin", action="store_true", help="attaque : PIN block avec une cle inconnue")
     asyncio.run(run(p.parse_args()))

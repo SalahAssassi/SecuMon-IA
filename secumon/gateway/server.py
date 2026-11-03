@@ -17,6 +17,8 @@ from secumon.gateway.replay import RC_DUPLICATE, ReplayError, ReplayGuard
 from secumon.gateway.tls import build_server_context, peer_common_name
 from secumon.gateway.tokenization import PanTokenizer, TokenizationError, load_token_key
 from secumon.hsm.hsm import Hsm, HsmKeyNotFound
+from secumon.hsm.pinblock import PinBlockError
+from secumon.hsm.pinblock import translate as translate_pin_block
 from secumon.iso8583.mac import MacError, sign_message, verify_and_decode
 from secumon.iso8583.messages import (
     MTI_AUTH_REQUEST, MTI_AUTH_RESPONSE, RC_APPROVED, RC_FORMAT_ERROR,
@@ -26,6 +28,7 @@ from secumon.iso8583.messages import (
 HOST, PORT = "127.0.0.1", 8583
 CERT, KEY, CA = "pki/gateway/gateway.crt", "pki/gateway/gateway.key", "pki/ca/ca.crt"
 MAX_MESSAGE = 4096
+RC_PIN_ERROR = "81"  # erreur cryptographique sur le PIN
 
 log = logging.getLogger("secumon.gateway")
 
@@ -42,7 +45,8 @@ def write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:
 
 
 def process_message(raw: bytes, terminal_id: str, mac_key, guard: ReplayGuard,
-                    tokenizer: PanTokenizer | None = None, events: EventLog | None = None) -> bytes:
+                    tokenizer: PanTokenizer | None = None, events: EventLog | None = None,
+                    pin_keys: tuple | None = None) -> bytes:
     """Chaine de controles : syntaxe -> MAC -> MTI -> identite -> anti-rejeu -> tokenisation.
     'mac_key' = cle HSM en production (le MAC est calcule DANS le HSM), ou bytes dans les tests."""
 
@@ -90,7 +94,19 @@ def process_message(raw: bytes, terminal_id: str, mac_key, guard: ReplayGuard,
     except TokenizationError as exc:
         return reject("PAN INVALIDE", "PAN_INVALID", RC_FORMAT_ERROR, request, exc)
 
-    # 6. Transaction acceptee (le scoring IA viendra ici)
+    # 6. PIN block (DE52) : traduit TPK -> ZPK dans le HSM, jamais journalise
+    pin_present = "52" in request
+    if pin_present:
+        if pin_keys is None:
+            return reject("PIN BLOCK", "PIN_CRYPTO_ERROR", RC_PIN_ERROR, request,
+                          "aucune cle PIN pour ce terminal")
+        try:
+            # Le bloc traduit (ZPK) serait transmis a la banque emettrice
+            translate_pin_block(bytes.fromhex(request["52"]), pan, *pin_keys)
+        except (PinBlockError, ValueError) as exc:
+            return reject("PIN BLOCK", "PIN_CRYPTO_ERROR", RC_PIN_ERROR, request, exc)
+
+    # 7. Transaction acceptee (le scoring IA viendra ici)
     #    Journal technique : PAN masque uniquement. Le jeton va seulement dans le journal
     #    d'evenements dedie a l'IA (principe de minimisation des donnees).
     amount = int(request.get("4", "0")) / 100
@@ -101,13 +117,13 @@ def process_message(raw: bytes, terminal_id: str, mac_key, guard: ReplayGuard,
         events.write(type="transaction", terminal=terminal_id, stan=request.get("11"),
                      token=token, bin=pan[:6], amount=amount, currency=request.get("49"),
                      mcc=request.get("18"), entry_mode=request.get("22"),
-                     response_code=RC_APPROVED)
+                     pin_present=pin_present, response_code=RC_APPROVED)
     return sign_message(build_auth_response(request, RC_APPROVED), mac_key)
 
 
 async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext, hsm: Hsm,
                             guard: ReplayGuard, limiter: RateLimiter,
-                            tokenizer: PanTokenizer, events: EventLog) -> None:
+                            tokenizer: PanTokenizer, events: EventLog, zpk=None) -> None:
     peer = writer.get_extra_info("peername")
     try:
         await writer.start_tls(tls_ctx)
@@ -137,6 +153,11 @@ async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext, hsm: Hsm,
             await writer.wait_closed()
         return
 
+    try:
+        pin_keys = (hsm.terminal_pin_key(terminal_id), zpk) if zpk else None
+    except HsmKeyNotFound:
+        pin_keys = None  # terminal sans TPK : ses transactions avec PIN seront refusees
+
     log.info("Connexion ACCEPTEE : terminal=%s ip=%s %s %s",
              terminal_id, peer, ssl_obj.version(), ssl_obj.cipher()[0])
 
@@ -149,7 +170,8 @@ async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext, hsm: Hsm,
                 events.write(type="security", terminal=terminal_id, reason="RATE_LIMIT",
                              detail=f"> {limiter.max_per_second} msg/s")
                 break
-            response = process_message(raw, terminal_id, mac_key, guard, tokenizer, events)
+            response = process_message(raw, terminal_id, mac_key, guard, tokenizer, events,
+                                       pin_keys)
             write_frame(writer, response)
             await writer.drain()
     except asyncio.IncompleteReadError:
@@ -167,6 +189,11 @@ async def main() -> None:
     hsm = Hsm.from_env()                       # session en lecture seule : la passerelle
     tokenizer = PanTokenizer(load_token_key())  # ne peut ni creer ni supprimer de cles
     events = EventLog()
+    try:
+        zpk = hsm.zone_pin_key()
+    except HsmKeyNotFound:
+        zpk = None
+        log.warning("ZPK absente du HSM : les transactions avec PIN seront refusees")
 
     store = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0"),
                                  decode_responses=True)
@@ -181,11 +208,11 @@ async def main() -> None:
 
     tls_ctx = build_server_context(CERT, KEY, CA)
     server = await asyncio.start_server(
-        lambda r, w: handle_connection(r, w, tls_ctx, hsm, guard, limiter, tokenizer, events),
+        lambda r, w: handle_connection(r, w, tls_ctx, hsm, guard, limiter, tokenizer, events, zpk),
         HOST, PORT,
     )
     log.info("Passerelle SecuMon-IA en ecoute sur %s:%d (TLS 1.3 + mTLS + ISO 8583 + MAC HSM "
-             "+ anti-rejeu + rate limiting %d/s + tokenisation)", HOST, PORT,
+             "+ anti-rejeu + rate limiting %d/s + tokenisation + PIN block)", HOST, PORT,
              limiter.max_per_second)
     log.info("Journal d'evenements : %s", events.path)
     try:
