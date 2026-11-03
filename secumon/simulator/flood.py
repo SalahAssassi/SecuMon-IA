@@ -7,7 +7,7 @@ import struct
 
 from secumon.common.config import load_dotenv
 from secumon.gateway.tls import build_client_context
-from secumon.hsm.keys import load_master_key, terminal_mac_key
+from secumon.simulator.keystore import load_terminal_key
 from secumon.iso8583.mac import sign_message, verify_and_decode
 from secumon.iso8583.messages import build_auth_request
 from secumon.simulator.terminal import certificate_cn
@@ -17,7 +17,7 @@ async def run(args) -> None:
     load_dotenv()
     terminal_id = certificate_cn(args.cert)
     ctx = build_client_context(args.ca, args.cert, args.key)
-    mac_key = terminal_mac_key(load_master_key(), terminal_id)
+    mac_key = load_terminal_key(terminal_id)
 
     reader, writer = await asyncio.open_connection(
         args.host, args.port, ssl=ctx, server_hostname="localhost"

@@ -1,5 +1,5 @@
-"""Passerelle acquereur SecuMon-IA (M2) - mTLS + ISO 8583 + MAC + anti-rejeu + rate limiting
-+ tokenisation du PAN + journal d'evenements pour les modules IA."""
+"""Passerelle acquereur SecuMon-IA (M2) - mTLS + ISO 8583 + MAC verifie par le HSM + anti-rejeu
++ rate limiting + tokenisation du PAN + journal d'evenements pour les modules IA."""
 import asyncio
 import contextlib
 import logging
@@ -16,7 +16,7 @@ from secumon.gateway.ratelimit import RateLimiter
 from secumon.gateway.replay import RC_DUPLICATE, ReplayError, ReplayGuard
 from secumon.gateway.tls import build_server_context, peer_common_name
 from secumon.gateway.tokenization import PanTokenizer, TokenizationError, load_token_key
-from secumon.hsm.keys import load_master_key, terminal_mac_key
+from secumon.hsm.hsm import Hsm, HsmKeyNotFound
 from secumon.iso8583.mac import MacError, sign_message, verify_and_decode
 from secumon.iso8583.messages import (
     MTI_AUTH_REQUEST, MTI_AUTH_RESPONSE, RC_APPROVED, RC_FORMAT_ERROR,
@@ -41,9 +41,10 @@ def write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:
     writer.write(struct.pack(">H", len(payload)) + payload)
 
 
-def process_message(raw: bytes, terminal_id: str, mac_key: bytes, guard: ReplayGuard,
+def process_message(raw: bytes, terminal_id: str, mac_key, guard: ReplayGuard,
                     tokenizer: PanTokenizer | None = None, events: EventLog | None = None) -> bytes:
-    """Chaine de controles : syntaxe -> MAC -> MTI -> identite -> anti-rejeu -> tokenisation."""
+    """Chaine de controles : syntaxe -> MAC -> MTI -> identite -> anti-rejeu -> tokenisation.
+    'mac_key' = cle HSM en production (le MAC est calcule DANS le HSM), ou bytes dans les tests."""
 
     def reject(label: str, reason: str, response_code: str, request: dict | None = None,
                detail: object = "") -> bytes:
@@ -56,7 +57,7 @@ def process_message(raw: bytes, terminal_id: str, mac_key: bytes, guard: ReplayG
                     else {"t": MTI_AUTH_RESPONSE, "39": response_code})
         return sign_message(response, mac_key)
 
-    # 1. Syntaxe + integrite (MAC)
+    # 1. Syntaxe + integrite (MAC verifie par le HSM)
     try:
         request = verify_and_decode(raw, mac_key)
     except iso8583.DecodeError as exc:
@@ -89,7 +90,7 @@ def process_message(raw: bytes, terminal_id: str, mac_key: bytes, guard: ReplayG
     except TokenizationError as exc:
         return reject("PAN INVALIDE", "PAN_INVALID", RC_FORMAT_ERROR, request, exc)
 
-    # 6. Transaction acceptee (le scoring de fraude M5 viendra ici)
+    # 6. Transaction acceptee (le scoring IA viendra ici)
     #    Journal technique : PAN masque uniquement. Le jeton va seulement dans le journal
     #    d'evenements dedie a l'IA (principe de minimisation des donnees).
     amount = int(request.get("4", "0")) / 100
@@ -104,7 +105,7 @@ def process_message(raw: bytes, terminal_id: str, mac_key: bytes, guard: ReplayG
     return sign_message(build_auth_response(request, RC_APPROVED), mac_key)
 
 
-async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext, master_key: bytes,
+async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext, hsm: Hsm,
                             guard: ReplayGuard, limiter: RateLimiter,
                             tokenizer: PanTokenizer, events: EventLog) -> None:
     peer = writer.get_extra_info("peername")
@@ -122,7 +123,20 @@ async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext, master_key:
 
     ssl_obj = writer.get_extra_info("ssl_object")
     terminal_id = peer_common_name(ssl_obj)
-    mac_key = terminal_mac_key(master_key, terminal_id)  # d'apres le CERTIFICAT, jamais DE41
+
+    # Cle MAC choisie d'apres le CERTIFICAT (jamais DE41), et elle reste DANS le HSM
+    try:
+        mac_key = hsm.terminal_key(terminal_id)
+    except HsmKeyNotFound:
+        log.warning("[%s] AUCUNE CLE dans le HSM pour ce terminal -> connexion refusee",
+                    terminal_id)
+        events.write(type="security", terminal=terminal_id, reason="NO_KEY",
+                     detail="certificat valide mais terminal non provisionne", peer=str(peer))
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+        return
+
     log.info("Connexion ACCEPTEE : terminal=%s ip=%s %s %s",
              terminal_id, peer, ssl_obj.version(), ssl_obj.cipher()[0])
 
@@ -150,8 +164,8 @@ async def handle_connection(reader, writer, tls_ctx: ssl.SSLContext, master_key:
 
 async def main() -> None:
     load_dotenv()
-    master_key = load_master_key()
-    tokenizer = PanTokenizer(load_token_key())
+    hsm = Hsm.from_env()                       # session en lecture seule : la passerelle
+    tokenizer = PanTokenizer(load_token_key())  # ne peut ni creer ni supprimer de cles
     events = EventLog()
 
     store = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0"),
@@ -160,22 +174,25 @@ async def main() -> None:
         store.ping()
     except redis.ConnectionError:
         log.error("Redis injoignable : lancez 'sudo service redis-server start'")
+        hsm.close()
         return
     guard = ReplayGuard(store)
     limiter = RateLimiter(store, int(os.environ.get("RATE_LIMIT_PER_SECOND", "10")))
 
     tls_ctx = build_server_context(CERT, KEY, CA)
     server = await asyncio.start_server(
-        lambda r, w: handle_connection(r, w, tls_ctx, master_key, guard, limiter,
-                                       tokenizer, events),
+        lambda r, w: handle_connection(r, w, tls_ctx, hsm, guard, limiter, tokenizer, events),
         HOST, PORT,
     )
-    log.info("Passerelle SecuMon-IA en ecoute sur %s:%d (TLS 1.3 + mTLS + ISO 8583 + MAC "
+    log.info("Passerelle SecuMon-IA en ecoute sur %s:%d (TLS 1.3 + mTLS + ISO 8583 + MAC HSM "
              "+ anti-rejeu + rate limiting %d/s + tokenisation)", HOST, PORT,
              limiter.max_per_second)
     log.info("Journal d'evenements : %s", events.path)
-    async with server:
-        await server.serve_forever()
+    try:
+        async with server:
+            await server.serve_forever()
+    finally:
+        hsm.close()
 
 
 if __name__ == "__main__":
