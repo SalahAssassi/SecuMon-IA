@@ -60,7 +60,7 @@ class SoftwareAes:
     primitive exigee par ISO 9564 format 4 (et non le mode ECB applique a un message)."""
 
     def __init__(self, key: bytes):
-        self._cipher = Cipher(algorithms.AES(key), modes.ECB())  # nosemgrep  # nosec B305 - un seul bloc aleatoire (ISO 9564 format 4)
+        self._cipher = Cipher(algorithms.AES(key), modes.ECB())  # nosemgrep  # nosec B305
 
     def encrypt_block(self, data: bytes) -> bytes:
         enc = self._cipher.encryptor()
