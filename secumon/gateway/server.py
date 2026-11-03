@@ -90,9 +90,11 @@ def process_message(raw: bytes, terminal_id: str, mac_key: bytes, guard: ReplayG
         return reject("PAN INVALIDE", "PAN_INVALID", RC_FORMAT_ERROR, request, exc)
 
     # 6. Transaction acceptee (le scoring de fraude M5 viendra ici)
+    #    Journal technique : PAN masque uniquement. Le jeton va seulement dans le journal
+    #    d'evenements dedie a l'IA (principe de minimisation des donnees).
     amount = int(request.get("4", "0")) / 100
-    log.info("[%s] %s STAN=%s PAN=%s TOKEN=%s montant=%.2f devise=%s MCC=%s -> DE39=%s",
-             terminal_id, request["t"], request.get("11"), mask_pan(pan), token,
+    log.info("[%s] %s STAN=%s PAN=%s montant=%.2f devise=%s MCC=%s -> DE39=%s",
+             terminal_id, request["t"], request.get("11"), mask_pan(pan),
              amount, request.get("49"), request.get("18"), RC_APPROVED)
     if events:
         events.write(type="transaction", terminal=terminal_id, stan=request.get("11"),
