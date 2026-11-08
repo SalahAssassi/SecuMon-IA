@@ -29,3 +29,6 @@ desktop.ini
 # --- Frontend ---
 frontend/node_modules/
 frontend/dist/
+
+# --- Sessions OWASP ZAP (trafic capture) ---
+zap-reports/
