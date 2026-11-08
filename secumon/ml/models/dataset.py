@@ -58,3 +58,17 @@ def features_frame(df: pd.DataFrame, categories: dict[str, list[str]]) -> pd.Dat
         known = X[c].where(X[c].isin(categories[c]))  # valeur inconnue -> NaN, explicitement
         X[c] = pd.Categorical(known, categories=categories[c])
     return X
+
+
+def iter_split(con: duckdb.DuckDBPyConnection, gold_path: str | Path, split: str,
+               n_parts: int):
+    """Lit un jeu complet par morceaux de clients (user_id % n_parts), pour limiter la memoire."""
+    if split not in SPLITS:
+        raise ValueError(f"Jeu inconnu : {split!r} (attendu : {SPLITS})")
+    if isinstance(n_parts, bool) or not isinstance(n_parts, int) or n_parts < 1:
+        raise ValueError("n_parts doit etre un entier >= 1")
+    src = _sql_path(gold_path)
+    for k in range(n_parts):
+        # split verifie par liste blanche, n_parts et k entiers, chemin valide par _sql_path.
+        sql = f"SELECT {_select_list()},\n    1.0 AS {WEIGHT}\nFROM read_parquet('{src}')\nWHERE split = '{split}' AND user_id % {n_parts} = {k}"  # nosec B608
+        yield con.sql(sql).df()

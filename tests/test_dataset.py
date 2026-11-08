@@ -63,3 +63,20 @@ def test_features_frame_types_and_unknown_category(tmp_path):
     assert str(X["mcc"].dtype) == "category"
     assert X["amount"].dtype == "float64"
     assert X["country_new"].isna().sum() == 1          # booleen manquant conserve (pas un 0)
+
+
+def test_iter_split_parts_rebuild_the_full_split(tmp_path):
+    path = _gold(tmp_path)
+    df = pd.read_parquet(path)
+    df["user_id"] = df["tx_id"] % 7                    # plusieurs clients
+    df.to_parquet(path, index=False)
+
+    parts = list(dataset.iter_split(duckdb.connect(), path, "train", 3))
+
+    assert len(parts) == 3
+    tx = [t for p in parts for t in p["tx_id"]]
+    assert sorted(tx) == sorted(df["tx_id"])           # rien de perdu, rien en double
+    for k, p in enumerate(parts):
+        assert (p["user_id"] % 3 == k).all()           # un client dans un seul morceau
+    with pytest.raises(ValueError, match="n_parts"):
+        list(dataset.iter_split(duckdb.connect(), path, "train", 0))
