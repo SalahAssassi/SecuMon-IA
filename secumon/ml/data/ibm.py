@@ -142,10 +142,10 @@ def build_transactions(con: duckdb.DuckDBPyConnection, bronze: str | Path, out: 
     out.parent.mkdir(parents=True, exist_ok=True)
     src, dst = _sql_path(bronze), _sql_path(out)
     # Chemins internes valides par _sql_path : aucune entree utilisateur dans les requetes.
-    con.execute(f"CREATE OR REPLACE VIEW bronze AS SELECT * FROM read_parquet('{src}', file_row_number = true)")
+    con.execute(f"CREATE OR REPLACE VIEW bronze AS SELECT * FROM read_parquet('{src}', file_row_number = true)")  # nosec B608
     con.execute(f"CREATE OR REPLACE VIEW silver_transactions AS {TRANSACTIONS_SQL}")
     con.execute(f"COPY silver_transactions TO '{dst}' (FORMAT parquet, COMPRESSION zstd)")
-    count = con.sql(f"SELECT COUNT(*) AS n FROM read_parquet('{dst}')").df()["n"].iloc[0]
+    count = con.sql(f"SELECT COUNT(*) AS n FROM read_parquet('{dst}')").df()["n"].iloc[0]  # nosec B608
     return int(count)
 
 
