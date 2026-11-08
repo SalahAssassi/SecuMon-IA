@@ -52,7 +52,9 @@ SELECT
     c.amt_ratio_avg_90d, c.amt_zscore_90d, c.n_purchases_90d, c.dist_home_km, c.dist_prev_km,
     c.hours_since_prev_phys, c.speed_kmh, c.country_new, c.mcc_new, c.merchant_new,
     year(t.ts) - cu.birth_year                         AS age_at_tx,
-    date_diff('month', k.acct_open_month, t.ts)        AS account_age_months,
+    -- Photo 2020 : une ouverture posterieure a la transaction est inconnue (NULL), pas negative.
+    CASE WHEN date_diff('month', k.acct_open_month, t.ts) >= 0
+         THEN date_diff('month', k.acct_open_month, t.ts) END  AS account_age_months,
     cu.yearly_income, cu.total_debt, cu.fico_score,
     k.credit_limit, k.card_type, k.card_brand, k.has_chip
 FROM gold_tx t

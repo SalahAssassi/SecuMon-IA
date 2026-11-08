@@ -73,3 +73,18 @@ def test_build_gold_detects_missing_join(tmp_path):
     silver, features = _write(tmp_path, cards_ids=("U9999-C0",))
     with pytest.raises(RuntimeError, match="Jointure incomplete"):
         gold.build_gold(duckdb.connect(), silver, features, tmp_path / "gold.parquet")
+
+
+def test_account_opened_after_transaction_is_null(tmp_path):
+    """Photo 2020 : une ouverture de compte posterieure a la transaction donne NULL, pas negatif."""
+    silver, features = _write(tmp_path)
+    cards = pd.read_parquet(silver / "cards.parquet")
+    cards["acct_open_month"] = pd.to_datetime(["2015-01-01"])
+    cards.to_parquet(silver / "cards.parquet", index=False)
+    out = tmp_path / "gold.parquet"
+
+    gold.build_gold(duckdb.connect(), silver, features, out)
+
+    df = pd.read_parquet(out).set_index("tx_id").sort_index()
+    assert pd.isna(df.loc[0, "account_age_months"])   # tx de mars 2014, compte ouvert en 2015
+    assert df.loc[1, "account_age_months"] == 12      # tx de janvier 2016
