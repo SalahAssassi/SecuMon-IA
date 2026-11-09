@@ -1,0 +1,10 @@
+decision:
+  decline_b: 0.7743450876498923
+  review_b: 0.09619235030166158
+  review_a: 0.6995017695112893
+decision_meta:
+  review_rate: 0.002
+  share_b: 0.5
+  calibrated_on: validation 2015
+  engine_b: lightgbm v1
+  engine_a: isolation_forest v2
