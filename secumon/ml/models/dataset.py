@@ -72,3 +72,20 @@ def iter_split(con: duckdb.DuckDBPyConnection, gold_path: str | Path, split: str
         # split verifie par liste blanche, n_parts et k entiers, chemin valide par _sql_path.
         sql = f"SELECT {_select_list()},\n    1.0 AS {WEIGHT}\nFROM read_parquet('{src}')\nWHERE split = '{split}' AND user_id % {n_parts} = {k}"  # nosec B608
         yield con.sql(sql).df()
+
+
+def load_sample(con: duckdb.DuckDBPyConnection, gold_path: str | Path, split: str,
+                every: int) -> pd.DataFrame:
+    """Echantillon PUR : 1 transaction sur `every`, fraudes dans leur proportion naturelle.
+
+    Aucune selection par l'etiquette (contrairement a load_split(sample_every=...)) :
+    sert a l'entrainement non supervise du moteur A.
+    """
+    if split not in SPLITS:
+        raise ValueError(f"Jeu inconnu : {split!r} (attendu : {SPLITS})")
+    if isinstance(every, bool) or not isinstance(every, int) or every < 1:
+        raise ValueError("every doit etre un entier >= 1")
+    src = _sql_path(gold_path)
+    # split verifie par liste blanche, every entier, chemin valide par _sql_path.
+    sql = f"SELECT {_select_list()},\n    1.0 AS {WEIGHT}\nFROM read_parquet('{src}')\nWHERE split = '{split}' AND tx_id % {every} = 0"  # nosec B608
+    return con.sql(sql).df()

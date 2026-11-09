@@ -80,3 +80,11 @@ def test_iter_split_parts_rebuild_the_full_split(tmp_path):
         assert (p["user_id"] % 3 == k).all()           # un client dans un seul morceau
     with pytest.raises(ValueError, match="n_parts"):
         list(dataset.iter_split(duckdb.connect(), path, "train", 0))
+
+
+def test_load_sample_is_not_enriched_with_frauds(tmp_path):
+    """Moteur A : les fraudes (tx 41 et 43) ne sont PAS ajoutees d'office, contrairement au train B."""
+    df = dataset.load_sample(duckdb.connect(), _gold(tmp_path), "train", every=20)
+    assert sorted(df["tx_id"]) == [0, 20]
+    assert not df["is_fraud"].any()
+    assert (df[dataset.WEIGHT] == 1.0).all()
