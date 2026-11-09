@@ -59,6 +59,11 @@ def test_label_is_never_used():
     pd.testing.assert_frame_equal(X1, X2)
 
 
+def test_selected_columns_are_valid_behaviour_columns():
+    assert set(anomaly.SELECTED_COLUMNS) <= set(anomaly.ANOMALY_COLUMNS)
+    assert "is_fraud" not in anomaly.SELECTED_COLUMNS
+
+
 def test_isolation_forest_ranks_obvious_outlier_first():
     df = _df(500)
     intrus = pd.DataFrame([{
@@ -71,12 +76,17 @@ def test_isolation_forest_ranks_obvious_outlier_first():
     df = pd.concat([df, intrus], ignore_index=True)
     X = anomaly.anomaly_matrix(df)
 
-    scores = anomaly.anomaly_score(anomaly.fit_isolation_forest(X, n_jobs=1), X)
+    # max_samples="auto" : le mini-jeu (501 lignes) est plus petit que 4096.
+    model = anomaly.fit_isolation_forest(X, max_samples="auto", n_jobs=1)
+    scores = anomaly.anomaly_score(model, X)
 
+    assert list(model.feature_names_in_) == list(anomaly.SELECTED_COLUMNS)
     assert int(np.argmax(scores)) == len(df) - 1
 
 
-def test_fit_rejects_wrong_columns():
-    X = anomaly.anomaly_matrix(_df(20)).drop(columns="hour")
+def test_fit_rejects_unknown_or_missing_columns():
+    X = anomaly.anomaly_matrix(_df(20))
+    with pytest.raises(ValueError, match="Colonnes manquantes"):
+        anomaly.fit_isolation_forest(X.drop(columns="dist_home_km"), max_samples="auto")
     with pytest.raises(ValueError, match="Colonnes inattendues"):
-        anomaly.fit_isolation_forest(X)
+        anomaly.fit_isolation_forest(X, columns=("is_fraud",), max_samples="auto")

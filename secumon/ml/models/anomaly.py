@@ -1,8 +1,10 @@
 """Moteur A : detection d'anomalies non supervisee (Isolation Forest, scikit-learn).
 
-L'etiquette is_fraud n'est jamais utilisee : le modele apprend uniquement le comportement
-normal. Seules les features comportementales (ecarts aux habitudes du client) sont utilisees ;
-le profil financier est exclu (un client aise n'est pas une anomalie).
+L'etiquette is_fraud n'est jamais utilisee : le modele apprend uniquement le comportement normal.
+
+Historique (notebook 09, validation uniquement, criteres fixes avant execution) :
+- v1 : 16 features comportementales, max_samples 256 -> PR-AUC validation 0,0225 ;
+- v2 (retenue) : 8 features de nouveaute et de geographie, max_samples 4096 -> 0,0677 (x 3).
 """
 
 from __future__ import annotations
@@ -19,6 +21,11 @@ BEHAVIOUR_FEATURES = [
     "hour",
 ]
 ANOMALY_COLUMNS = ["online"] + BEHAVIOUR_FEATURES
+
+# Configuration retenue (v2) : nouveaute + geographie.
+SELECTED_COLUMNS = ("online", "country_new", "merchant_new", "mcc_new",
+                    "dist_home_km", "dist_prev_km", "speed_kmh", "amt_ratio_avg_90d")
+DEFAULT_MAX_SAMPLES = 4096
 
 # Transformation log signee pour les variables a queue lourde (ex. vitesse 958 123 km/h).
 SIGNED_LOG = ["amount", "amt_ratio_avg_90d", "amt_zscore_90d", "amt_sum_24h",
@@ -37,7 +44,7 @@ NEUTRAL = {
 
 
 def anomaly_matrix(df: pd.DataFrame) -> pd.DataFrame:
-    """Matrice du moteur A : 16 colonnes numeriques, sans valeur manquante, sans etiquette."""
+    """Matrice complete (16 colonnes numeriques), sans valeur manquante, sans etiquette."""
     X = pd.DataFrame(index=df.index)
     X["online"] = (df["channel"] == "online").astype("float64")
     for c in BEHAVIOUR_FEATURES:
@@ -48,13 +55,20 @@ def anomaly_matrix(df: pd.DataFrame) -> pd.DataFrame:
     return X
 
 
-def fit_isolation_forest(X: pd.DataFrame, seed: int = 42, n_estimators: int = 200,
-                         n_jobs: int = 4) -> IsolationForest:
-    if list(X.columns) != ANOMALY_COLUMNS:
-        raise ValueError("Colonnes inattendues : utiliser anomaly_matrix()")
-    return IsolationForest(n_estimators=n_estimators, random_state=seed, n_jobs=n_jobs).fit(X)
+def fit_isolation_forest(X: pd.DataFrame, columns: tuple[str, ...] = SELECTED_COLUMNS,
+                         max_samples: int | str = DEFAULT_MAX_SAMPLES, seed: int = 42,
+                         n_estimators: int = 200, n_jobs: int = 4) -> IsolationForest:
+    unknown = [c for c in columns if c not in ANOMALY_COLUMNS]
+    if unknown or not columns:
+        raise ValueError(f"Colonnes inattendues : {unknown}")
+    missing = [c for c in columns if c not in X.columns]
+    if missing:
+        raise ValueError(f"Colonnes manquantes : {missing} (utiliser anomaly_matrix())")
+    model = IsolationForest(n_estimators=n_estimators, max_samples=max_samples,
+                            random_state=seed, n_jobs=n_jobs)
+    return model.fit(X[list(columns)])
 
 
 def anomaly_score(model: IsolationForest, X: pd.DataFrame) -> np.ndarray:
-    """Score d'anomalie : plus il est eleve, plus la transaction est inhabituelle."""
-    return -model.score_samples(X)
+    """Score d'anomalie (plus eleve = plus inhabituel), sur les colonnes apprises par le modele."""
+    return -model.score_samples(X[list(model.feature_names_in_)])
